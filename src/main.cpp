@@ -1,4 +1,5 @@
 #include <iostream>
+#include <map>
 #include <stack>
 #include <string>
 #include <vector>
@@ -56,33 +57,125 @@ std::vector<std::string> split(const std::string& str, const std::string& delimi
 	return v;
 }
 
-
-variant read_wml(const std::string& filename)
+class WmlReader
 {
-	auto contents = sys::read_file(filename);
+public:
+	explicit WmlReader(const std::string& filename, const std::string& contents)
+		: file_name_(filename),
+		  contents_(contents),
+		  line_count_(1)
+	{
+	}
+private:
+	std::string file_name_;
+	std::string contents_;
+	int line_count_;
+};
+
+class Macro
+{
+public:
+	explicit Macro(const std::string& name, const std::vector<std::string>& params)
+		: name_(name),
+		  params_(params),
+		  data_()
+	{
+	}
+	void setDefinition(const std::string& v) { data_ = v; }
+private:
+	std::string name_;
+	std::vector<std::string> params_;
+	std::string data_;
+};
+
+typedef std::shared_ptr<Macro> MacroPtr;
+
+typedef std::map<std::string, MacroPtr> macro_cache_type;
+macro_cache_type& get_macro_cache()
+{
+	static macro_cache_type res;
+	return res;
+}
+
+
+variant read_wml(const std::string& filename, const std::string& contents, int line_offset=0)
+{
 	auto lines = split(contents, "\n", SplitFlags::NONE);
 	std::stack<std::string> tag_name_stack;
-	int line_count = 1;
+	int line_count = 1 + line_offset;
 	std::stack<variant_builder> vtags;
 	vtags.emplace();
 	bool in_multi_line_string = false;
 	bool is_translateable_ml_string = false;
 	std::string ml_string;
 	std::string attribute;
+	MacroPtr current_macro = nullptr;
+	std::string macro_lines;
 	for(auto& line : lines) {
 		boost::trim(line);
-		if(line.empty() || line[0] == '#') {
-			// skip blank lines and comments.
+		// search for any inline comments to remove or pre-processor directives to action.
+		auto comment_pos = line.find('#');
+		if(comment_pos != std::string::npos) {
+			std::string pre_processor_stmt = line.substr(comment_pos + 1);
+			line = boost::trim_copy(line.substr(0, comment_pos));
+			if(line.empty() && pre_processor_stmt.empty()) {
+				// skip blank lines
+				++line_count;
+				continue;
+			}
+			if((pre_processor_stmt[0] == ' ' || pre_processor_stmt[0] == '#') && line.empty()) {
+				// skip comments.
+				++line_count;
+				continue;
+			}
+			// we read in the next symbol to see what action we need to take.
+			auto space_pos = pre_processor_stmt.find(' ');
+			std::string directive = pre_processor_stmt;
+			if(space_pos != std::string::npos) {
+				directive = pre_processor_stmt.substr(0, space_pos);
+			}
+			if(directive == "define") {
+				ASSERT_LOG(current_macro == nullptr, "Found #define inside a macro. line: " << line_count << "; " << filename);
+				auto macro_line = boost::regex_replace(pre_processor_stmt.substr(space_pos + 1), re_whitespace_match, " ");
+				auto params = split(macro_line, " ", SplitFlags::NONE);
+				// first parameter is the name of the macro.
+				current_macro = get_macro_cache()[params[0]];
+				ASSERT_LOG(current_macro == nullptr, "Detected duplicate macro name: " << params[0] << "; line: " << line_count << "; " << filename) ;
+				current_macro = std::make_shared<Macro>(params[0], std::vector<std::string>(params.cbegin() + 1, params.cend()));
+				++line_count;
+				continue;
+			} else if (directive == "enddef") {
+				ASSERT_LOG(current_macro != nullptr, "Found #enddef and not in a macro definition. line: " << line_count << "; " << filename);
+				if(!line.empty()) {
+					macro_lines += line + '\n';
+				}
+				//variant macro_def = read_wml(filename, macro_lines, line_count);
+				current_macro->setDefinition(macro_lines);
+				// clear the current macro data.
+				current_macro.reset();
+				macro_lines.clear();
+				++line_count;
+				continue;
+			} else {
+				//LOG_WARN("Unrecognised pre-processor directive: " << directive << "; line: " << line_count << "; " << filename);
+			}
+		}
+
+		if(line.empty()) {
+			// skip blank lines
 			++line_count;
 			continue;
 		}
-		auto& vb = vtags.top();
 
-		// search for any inline comments to remove.
-		auto comment_pos = line.find('#');
-		if(comment_pos != std::string::npos) {
-			line = boost::trim_copy(line.substr(0, comment_pos));
+		// just collect the lines for parsing while in a macro.
+		if(current_macro) {
+			macro_lines += line + '\n';
+			++line_count;
+			continue;
 		}
+
+
+		auto& vb = vtags.top();
 
 		// line should be valid at this point
 		boost::cmatch what;
@@ -113,7 +206,11 @@ variant read_wml(const std::string& filename)
 			//LOG_ERROR("unprocessed macro: " << line);
 			macro_line = boost::regex_replace(macro_line, re_whitespace_match, " ");
 			auto strs = split(macro_line, " ", SplitFlags::NONE);
-			LOG_ERROR("unprocessed macro: " << strs.front());
+
+			auto it = get_macro_cache().find(strs.front());
+			if(it == get_macro_cache().end()) {
+				LOG_ERROR("No macro definition for: " << strs.front() << "; line: " << line_count << "; " << filename);
+			}
 		} else {
 			std::string value;
 			auto pos = line.find_first_of('=');
@@ -176,17 +273,17 @@ int main(int argc, char* argv[])
 		args.emplace_back(argv[n]);
 	}
 
-	variant terrain_types = read_wml(base_path + terrain_type_file);
+	variant terrain_types = read_wml(terrain_type_file, sys::read_file(base_path + terrain_type_file));
 	sys::write_file(terrain_type_file, terrain_types.write_json(true, 4));
 
 	sys::file_path_map fpm;
 	sys::get_unique_files(base_path + terrain_graphics_macros_dir, fpm);
 	for(const auto& p : fpm) {
 		if(p.first.find(".cfg") != std::string::npos) {
-			read_wml(p.second);
+			read_wml(p.first, sys::read_file(p.second));
 		}
 	}
 	
-	variant terrain_graphics = read_wml(base_path + terrain_graphics_file);
+	variant terrain_graphics = read_wml(terrain_graphics_file, sys::read_file(base_path + terrain_graphics_file));
 	sys::write_file(terrain_graphics_file, terrain_graphics.write_json(true, 4));
 }
