@@ -1,0 +1,49 @@
+# Compiled Object files
+*.slo
+*.lo
+*.o
+*.obj
+
+# Compiled Dynamic libraries
+*.so
+*.dylib
+#*.dll
+
+# Compiled Static libraries
+*.lai
+*.la
+*.a
+#*.lib
+
+# Executables
+*.exe
+*.out
+*.app
+terrain_parser
+
+# Dependency files
+*.d
+
+# vim swap files
+*.swp
+
+# msvc files we definitely do not want
+*.sdf
+*.tlog
+*.pdb
+*.log
+*.idb
+*.ilk
+*.lastbuildstate
+*.suo
+*.user
+*.unsuccessfulbuild
+*.opensdf
+*.def
+*.exp
+vs2013/Debug
+vs2013/Release
+vs2013/*.dll
+vs2013/*.txt
+/vs2013/xhtml.VC.VC.opendb
+/vs2013/xhtml.VC.db
