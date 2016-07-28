@@ -14,7 +14,13 @@
 
 namespace 
 {
+#ifdef __linux__
+	const std::string base_path = "../wesnoth/data/core/";
+#elif defined(_MSC_VER)
 	const std::string base_path = "c:\\projects\\wesnoth\\data\\core\\";
+#else
+	#error Unknown operating system.
+#endif
 
 	const std::string terrain_type_file = "terrain.cfg";
 	const std::string terrain_graphics_file = "terrain-graphics.cfg";
@@ -111,7 +117,7 @@ variant read_wml(const std::string& filename)
 		} else {
 			std::string value;
 			auto pos = line.find_first_of('=');
-			ASSERT_LOG(pos != std::string::npos, "error no '=' on line " << line_count << ": " << line);
+			ASSERT_LOG(pos != std::string::npos, "error no '=' on line " << line_count << ": " << line << "file: " << filename);
 			attribute = line.substr(0, pos);
 			value = line.substr(pos + 1);
 			boost::trim(value);
@@ -173,6 +179,14 @@ int main(int argc, char* argv[])
 	variant terrain_types = read_wml(base_path + terrain_type_file);
 	sys::write_file(terrain_type_file, terrain_types.write_json(true, 4));
 
+	sys::file_path_map fpm;
+	sys::get_unique_files(base_path + terrain_graphics_macros_dir, fpm);
+	for(const auto& p : fpm) {
+		if(p.first.find(".cfg") != std::string::npos) {
+			read_wml(p.second);
+		}
+	}
+	
 	variant terrain_graphics = read_wml(base_path + terrain_graphics_file);
 	sys::write_file(terrain_graphics_file, terrain_graphics.write_json(true, 4));
 }
