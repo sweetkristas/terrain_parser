@@ -34,6 +34,7 @@ namespace
 	boost::regex re_macro_match("\\{(.*?)\\}");
 	boost::regex re_whitespace_match("\\s+");
 	boost::regex re_parens_match("\\((.*?)\\)");
+	boost::regex re_quote_match("\"(.*?)\"");
 }
 
 enum class SplitFlags {
@@ -228,6 +229,9 @@ std::string macro_substitute(const std::string& contents)
 							str = "()";
 						}
 					}
+					if(boost::regex_match(sit->c_str(), what, re_quote_match)) {
+						str = std::string(what[1].first, what[1].second);
+					}
 					boost::replace_all(def, '{' + p + '}', str);
 					++sit;
 				}
@@ -248,13 +252,20 @@ std::string macro_substitute(const std::string& contents)
 	return output_str;
 }
 
+struct TagHelper
+{
+	TagHelper() : name(), vb() {}
+	std::string name;
+	variant_builder vb;
+};
+
 variant read_wml(const std::string& filename, const std::string& contents, int line_offset=0)
 {
 	auto lines = split(contents, "\n", SplitFlags::NONE);
-	std::stack<std::string> tag_name_stack;
 	int line_count = 1 + line_offset;
-	std::stack<variant_builder> vtags;
-	vtags.emplace();
+	std::stack<TagHelper> tag_stack;
+	tag_stack.emplace();
+
 	bool in_multi_line_string = false;
 	bool is_translateable_ml_string = false;
 	std::string ml_string;
@@ -284,7 +295,7 @@ variant read_wml(const std::string& filename, const std::string& contents, int l
 			continue;
 		}
 
-		auto& vb = vtags.top();
+		auto& vb = tag_stack.top();
 
 		// line should be valid at this point
 		boost::cmatch what;
@@ -293,25 +304,47 @@ variant read_wml(const std::string& filename, const std::string& contents, int l
 			ml_string += "\n" + line.substr(0, quote_pos);
 			if(quote_pos != std::string::npos) {
 				in_multi_line_string = false;
-				vb.add(attribute, (is_translateable_ml_string ? "~" : "") + ml_string + (is_translateable_ml_string ? "~" : ""));
+				vb.vb.add(attribute, (is_translateable_ml_string ? "~" : "") + ml_string + (is_translateable_ml_string ? "~" : ""));
 				is_translateable_ml_string = false;
 			}
 		} else if(boost::regex_match(line.c_str(), what, re_open_tag)) {
 			// Opening tag
-			tag_name_stack.emplace(std::string(what[1].first, what[1].second));
-			vtags.emplace();
+			std::string last_tag_name(what[1].first, what[1].second);
+			if(last_tag_name[0] == '+') {
+				// replace fields from last tag of this type.
+				bool found = false;
+
+				std::stack<TagHelper> last_tags;
+				while(!found) {
+					ASSERT_LOG(!tag_stack.empty(), "No previous tag of type: " << last_tag_name << " found.");
+					if(tag_stack.top().name == last_tag_name.substr(1)) {
+						found = true;
+					} else {
+						last_tags.emplace(tag_stack.top());
+						tag_stack.pop();
+					}
+				}
+				TagHelper top = tag_stack.top();
+				while(!last_tags.empty()) {
+					tag_stack.emplace(last_tags.top());
+					last_tags.pop();
+				}
+				tag_stack.emplace(top);
+			} else {
+				tag_stack.emplace();
+			}
 		} else if(boost::regex_match(line.c_str(), what, re_close_tag)) {
 			// Closing tag
 			std::string this_tag(what[1].first, what[1].second);
-			if(tag_name_stack.top()[0] == '+') {
-				this_tag = '+' + this_tag;
-			}
-			ASSERT_LOG(this_tag == tag_name_stack.top(), "tag name mismatch error: " << this_tag << " != " << tag_name_stack.top() << "; line: " << line_count);
-			tag_name_stack.pop();
-			auto old_vb = vtags.top();
-			vtags.pop();
-			ASSERT_LOG(!vtags.empty(), "vtags stack was empty.");
-			vtags.top().add(this_tag, old_vb.build());
+			//if(tag_name_stack.top()[0] == '+') {
+			//	this_tag = '+' + this_tag;
+			//}
+			ASSERT_LOG(this_tag == tag_stack.top().name, "tag name mismatch error: " << this_tag << " != " << tag_stack.top().name << "; line: " << line_count);
+			tag_stack.pop();
+			auto old_vb = tag_stack.top().vb;
+			tag_stack.pop();
+			ASSERT_LOG(!tag_stack.empty(), "vtags stack was empty.");
+			tag_stack.top().vb.add(this_tag, old_vb.build());
 		} else if(boost::regex_match(line.c_str(), what, re_macro_match)) {
 			std::string macro_line(what[1].first, what[1].second);
 			// is a macro, requiring expansion.
@@ -344,7 +377,7 @@ variant read_wml(const std::string& filename, const std::string& contents, int l
 					// integer
 					try {
 						int num = boost::lexical_cast<int>(value);
-						vb.add(attribute, num);
+						vb.vb.add(attribute, num);
 					} catch(boost::bad_lexical_cast&) {
 						ASSERT_LOG(false, "Unable to convert value '" << value << "' to integer.");
 					}
@@ -352,7 +385,7 @@ variant read_wml(const std::string& filename, const std::string& contents, int l
 					// float
 					try {
 						double num = boost::lexical_cast<double>(value);
-						vb.add(attribute, num);
+						vb.vb.add(attribute, num);
 					} catch(boost::bad_lexical_cast&) {
 						ASSERT_LOG(false, "Unable to convert value '" << value << "' to double.");
 					}
@@ -369,14 +402,14 @@ variant read_wml(const std::string& filename, const std::string& contents, int l
 				if(quote_pos_start != std::string::npos && quote_pos_end != std::string::npos) {
 					value = value.substr(quote_pos_start+1, quote_pos_end - (quote_pos_start + 1));
 				}
-				vb.add(attribute, (is_translateable ? "~" : "") + value + (is_translateable ? "~" : ""));
+				vb.vb.add(attribute, (is_translateable ? "~" : "") + value + (is_translateable ? "~" : ""));
 			}
 		}
 
 		++line_count;
 	}
-	ASSERT_LOG(!vtags.empty(), "vtags stack was empty.");
-	return vtags.top().build();
+	ASSERT_LOG(!tag_stack.empty(), "tag_stack was empty.");
+	return tag_stack.top().vb.build();
 }
 
 int main(int argc, char* argv[])
