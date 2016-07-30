@@ -259,18 +259,25 @@ struct TagHelper
 	std::shared_ptr<variant_builder> vb;
 };
 
+struct TagHelper2
+{
+	TagHelper2() : name(), vb() {}
+	std::string name;
+	variant_builder vb;
+};
+
 class node;
 typedef std::shared_ptr<node> node_ptr;
 
 class node : public std::enable_shared_from_this<node>
 {
 	public:
-		explicit node(const std::string& name) : name_(name), children_(), attr_(), parent_(parent) {}
+		explicit node(const std::string& name) : name_(name), children_(), attr_(), parent_() {}
 		const std::string& name() const { return name_; }
-		node_ptr add_child(const node_ptr& chld) {
+		node_ptr add_child(const node_ptr& child) {
 			child->set_parent(shared_from_this()); 
 			children_.emplace_back(child);
-			return chld;
+			return child;
 		}
 		node_ptr parent() const {
 			auto p = parent_.lock();
@@ -280,10 +287,31 @@ class node : public std::enable_shared_from_this<node>
 		void add_attr(const std::string& a, const std::string& v) {
 			attr_[a] = v;
 		}
+		const std::map<std::string, std::string>& attributes() const { return attr_; }
+		template<typename T>
+		bool pre_order_traversal(std::function<bool(node_ptr, T& param)> fn, T& param) {
+			if(!fn(shared_from_this(), param)) {
+				return false;
+			}
+			for(auto& c : children_) {
+				if(!c->pre_order_traversal(fn, param)) {
+					return false;
+				}
+			}
+			return true;
+		}
+		template<typename T>
+		void post_order_traversal(std::function<void(node_ptr, T& param)> fn1, std::function<void(node_ptr, T& param)> fn2, T& param) {
+			fn1(shared_from_this(), param);
+			for(auto& c : children_) {
+				c->post_order_traversal(fn1, fn2, param);
+			}
+			fn2(shared_from_this(), param);
+		}
 	protected:
-		void set_parent(std::shared_ptr parent) { parent_ = parent; }
+		void set_parent(node_ptr parent) { parent_ = parent; }
 	private:
-	`	std::string name_;
+		std::string name_;
 		std::vector<node_ptr> children_;
 		std::map<std::string, std::string> attr_;
 		std::weak_ptr<node> parent_;
@@ -291,8 +319,9 @@ class node : public std::enable_shared_from_this<node>
 
 node_ptr read_wml2(const std::string& contents) 
 {
-	node_ptr root = std::make_shared<node>();
-	node_ptr current = root;
+	node_ptr root = std::make_shared<node>("");
+	std::stack<node_ptr> current;
+	current.emplace(root);
 	
 	auto lines = split(contents, "\n", SplitFlags::NONE);
 	
@@ -302,6 +331,8 @@ node_ptr read_wml2(const std::string& contents)
 	std::string attribute;
 
 	int expect_merge = 0;
+
+	std::map<std::string, node_ptr> last_node;
 
 	for(auto& line : lines) {
 		boost::trim(line);
@@ -328,7 +359,7 @@ node_ptr read_wml2(const std::string& contents)
 			ml_string += "\n" + line.substr(0, quote_pos);
 			if(quote_pos != std::string::npos) {
 				in_multi_line_string = false;
-				current->add_attr(attribute, (is_translateable_ml_string ? "~" : "") + ml_string + (is_translateable_ml_string ? "~" : ""));
+				current.top()->add_attr(attribute, (is_translateable_ml_string ? "~" : "") + ml_string + (is_translateable_ml_string ? "~" : ""));
 				is_translateable_ml_string = false;
 				ml_string.clear();
 			}
@@ -337,24 +368,29 @@ node_ptr read_wml2(const std::string& contents)
 			std::string tag_name(what[1].first, what[1].second);
 			if(tag_name[0] == '+') {
 				++expect_merge;
+				auto it = last_node.find(tag_name.substr(1));
+				ASSERT_LOG(it != last_node.end(), "Unable to find merge to node for " << tag_name);
+				current.emplace(it->second);
 			} else {
-				current = current->add_child(std::make_shared<node>(tag_name));
+				current.emplace(current.top()->add_child(std::make_shared<node>(tag_name)));
+				last_node[tag_name] = current.top();
 			}
 		} else if(boost::regex_match(line.c_str(), what, re_close_tag)) {
 			// Closing tag
 			std::string this_tag(what[1].first, what[1].second);
 			if(expect_merge != 0) {
 				--expect_merge;
+				current.pop();
 				continue;
 			}
-			ASSERT_LOG(this_tag == current->name(), "tag name mismatch error: " << this_tag << " != " << current->name() << "; line: " << line_count);
-			current = current->parent();
+			ASSERT_LOG(this_tag == current.top()->name(), "tag name mismatch error: " << this_tag << " != " << current.top()->name());
+			current.pop();
 		} else if(boost::regex_match(line.c_str(), what, re_macro_match)) {
-			ASSERT_LOG(false, "Found an unexpanded macro definition." << line_count << ": " << line << "file: " << filename);
+			ASSERT_LOG(false, "Found an unexpanded macro definition.");
 		} else {
 			std::string value;
 			auto pos = line.find_first_of('=');
-			ASSERT_LOG(pos != std::string::npos, "error no '=' on line " << line_count << ": " << line << "file: " << filename);
+			ASSERT_LOG(pos != std::string::npos, "error no '=' " << line);
 			attribute = line.substr(0, pos);
 			value = line.substr(pos + 1);
 			boost::trim(value);
@@ -362,7 +398,7 @@ node_ptr read_wml2(const std::string& contents)
 				in_multi_line_string = true;
 				is_translateable_ml_string = value[0] == '_';
 				auto quote_pos = value.find('"');
-				ASSERT_LOG(quote_pos != std::string::npos, "Missing quotation mark on line " << line_count << ": " << value);
+				ASSERT_LOG(quote_pos != std::string::npos, "Missing quotation mark on line " << line);
 				ml_string = value.substr(quote_pos+1);
 			} else {
 				bool is_translateable = false;
@@ -376,14 +412,11 @@ node_ptr read_wml2(const std::string& contents)
 				if(quote_pos_start != std::string::npos && quote_pos_end != std::string::npos) {
 					value = value.substr(quote_pos_start+1, quote_pos_end - (quote_pos_start + 1));
 				}
-				current->add_attr(attribute, (is_translateable ? "~" : "") + value + (is_translateable ? "~" : ""));
+				current.top()->add_attr(attribute, (is_translateable ? "~" : "") + value + (is_translateable ? "~" : ""));
 			}
 		}
-
-		++line_count;
 	}
-	ASSERT_LOG(!tag_stack.empty(), "tag_stack was empty.");
-	return tag_stack.top().vb->build();
+	return root;
 }
 
 variant read_wml(const std::string& filename, const std::string& contents, int line_offset=0)
@@ -551,7 +584,7 @@ int main(int argc, char* argv[])
 		args.emplace_back(argv[n]);
 	}
 
-	/*variant terrain_types = read_wml(terrain_type_file, sys::read_file(base_path + terrain_type_file));
+	variant terrain_types = read_wml(terrain_type_file, sys::read_file(base_path + terrain_type_file));
 	sys::write_file(terrain_type_file, terrain_types.write_json(true, 4));
 
 	sys::file_path_map fpm;
@@ -564,10 +597,10 @@ int main(int argc, char* argv[])
 
 	auto subst_data = macro_substitute(sys::read_file(base_path + terrain_graphics_file));
 	sys::write_file("test.cfg", subst_data);
-	variant terrain_graphics = read_wml(terrain_graphics_file, subst_data);
-	sys::write_file(terrain_graphics_file, terrain_graphics.write_json(true, 4));*/
+	//variant terrain_graphics = read_wml(terrain_graphics_file, subst_data);
+	//sys::write_file(terrain_graphics_file, terrain_graphics.write_json(true, 4));
 
-	std::cout << read_wml2("test", "[terrain_graphics]\n\
+	/*auto rt = read_wml2("[terrain_graphics]\n\
 [tile]\n\
 x,y=0,0\n\
 type=Ai\n\
@@ -589,5 +622,27 @@ name=frozen/ice2.png\n\
 variations=""\n\
 [/image]\n\
 [/tile]\n\
-[/terrain_graphics]\n").write_json(true, 4);
+[/terrain_graphics]\n");*/
+	auto rt = read_wml2(subst_data);
+	/*rt->pre_order_traversal([](node_ptr n) {
+		std::cout << n->name() << "\n";
+		for(const auto& p : n->attributes()) {
+			std::cout << "  " << p.first << " : " << p.second << "\n";
+		}
+		return true;
+	});*/
+	std::stack<variant_builder> tags;
+	tags.emplace();
+	rt->post_order_traversal<std::stack<variant_builder>>([](node_ptr n, std::stack<variant_builder>& tags) {
+		tags.emplace();
+		}, [](node_ptr n, std::stack<variant_builder>& tags) {
+		for(const auto& p : n->attributes()) {
+			tags.top().add(p.first, p.second);
+		}
+		auto old_vb = tags.top();
+		tags.pop();
+		tags.top().add(n->name(), old_vb.build());
+	}, tags);
+	variant terrain_graphics = tags.top().build();
+	sys::write_file(terrain_graphics_file, terrain_graphics.write_json(true, 4));
 }
