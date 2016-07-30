@@ -44,20 +44,26 @@ enum class SplitFlags {
 
 std::vector<std::string> split(const std::string& str, const std::string& delimiters, SplitFlags flags)
 {
-	std::vector<std::string> v;
+	std::vector<std::string> res;
+	boost::split(res, str, boost::is_any_of(delimiters));
+	if(flags == SplitFlags::NONE) {
+		res.erase(std::remove(res.begin(), res.end(), ""), res.end());
+	}
+	return res;
+	/*std::vector<std::string> v;
 	std::string::size_type start = 0;
-	auto pos = str.find_first_of(delimiters, start);
-	while(pos != std::string::npos) {
-		if(pos != start && flags != SplitFlags::ALLOW_EMPTY_STRINGS) { // ignore empty tokens
+	std::string::size_type pos = str.find_first_of(delimiters, start);
+	 do {
+		if(pos != start || flags == SplitFlags::ALLOW_EMPTY_STRINGS) { // ignore empty tokens
 			v.emplace_back(str, start, pos - start);
 		}
 		start = pos + 1;
 		pos = str.find_first_of(delimiters, start);
-	}
+	} while(pos != std::string::npos);
 	if(start < str.length()) { // ignore trailing delimiter
 		v.emplace_back(str, start, str.length() - start); // add what's left of the string
 	}
-	return v;
+	return v;*/
 }
 
 class WmlReader
@@ -576,6 +582,59 @@ variant read_wml(const std::string& filename, const std::string& contents, int l
 	return tag_stack.top().vb->build();
 }
 
+variant to_int(const std::string& s)
+{
+	// integer
+	try {
+		int num = boost::lexical_cast<int>(s);
+		return variant(num);
+	} catch(boost::bad_lexical_cast&) {
+		ASSERT_LOG(false, "Unable to convert value '" << s << "' to integer.");
+	}
+	return variant();
+}
+
+variant to_list_int(const std::string& s, const std::string& sep=",")
+{
+	std::vector<variant> list;
+	const auto strs = split(s, sep, SplitFlags::NONE);
+	for(const auto& str : strs) {
+		boost::cmatch what;
+		if(boost::regex_match(str.c_str(), what, re_num_match)) {
+			const std::string frac(what[1].first, what[1].second);
+			if(frac.empty()) {
+				// integer
+				try {
+					int num = boost::lexical_cast<int>(str);
+					list.emplace_back(variant(num));
+				} catch(boost::bad_lexical_cast&) {
+					ASSERT_LOG(false, "Unable to convert value '" << str << "' to integer.");
+				}
+			} else {
+				try {
+					double num = boost::lexical_cast<double>(str);
+					list.emplace_back(variant(num));
+				} catch(boost::bad_lexical_cast&) {
+					ASSERT_LOG(false, "Unable to convert value '" << str << "' to double.");
+				}
+			}
+		} else {
+			ASSERT_LOG(false, "Wasn't numeric value: " << str);
+		}
+	}
+	return variant(&list);
+}
+
+variant to_list_string(const std::string& s, const std::string& sep=",", SplitFlags flags=SplitFlags::NONE)
+{
+	std::vector<variant> res;
+	const auto strs = split(s, sep, flags);
+	for(const auto& str : strs) {
+		res.emplace_back(variant(str));
+	}
+	return variant(&res);
+}
+
 int main(int argc, char* argv[])
 {
 	std::vector<std::string> args;
@@ -637,12 +696,45 @@ variations=""\n\
 		tags.emplace();
 		}, [](node_ptr n, std::stack<variant_builder>& tags) {
 		for(const auto& p : n->attributes()) {
-			tags.top().add(p.first, p.second);
+			if(p.first == "center") {
+				tags.top().add(p.first, to_list_int(p.second));
+			} else if(p.first == "base") {
+				tags.top().add(p.first, to_list_int(p.second));
+			} else if(p.first == "layer") {
+				tags.top().add(p.first, to_int(p.second));
+			} else if(p.first == "pos") {
+				tags.top().add(p.first, to_int(p.second));
+			} else if(p.first == "rotations") {
+				tags.top().add(p.first, to_list_string(p.second));
+			} else if(p.first == "set_no_flag") {
+				tags.top().add(p.first, to_list_string(p.second));
+			} else if(p.first == "set_flag") {
+				tags.top().add(p.first, to_list_string(p.second));
+			} else if(p.first == "no_flag") {
+				tags.top().add(p.first, to_list_string(p.second));
+			} else if(p.first == "has_flag") {
+				tags.top().add(p.first, to_list_string(p.second));
+			} else if(p.first == "variations") {
+				//tags.top().add(p.first, to_list_int(p.second, ";"));
+				tags.top().add(p.first, to_list_string(p.second, ";", SplitFlags::ALLOW_EMPTY_STRINGS));
+			} else if(p.first == "x,y") {
+				auto v = to_list_int(p.second);
+				tags.top().add("x", v[0]);
+				tags.top().add("y", v[1]);
+			} else if(p.first == "probability") {
+				tags.top().add(p.first, to_int(p.second));
+			} else if(p.first == "map") {
+				tags.top().add(p.first, to_list_string(p.second, "\n"));
+			} else if(p.first == "type") {
+				tags.top().add(p.first, to_list_string(p.second));
+			} else {
+				tags.top().add(p.first, p.second);
+			}
 		}
 		auto old_vb = tags.top();
 		tags.pop();
 		tags.top().add(n->name(), old_vb.build());
 	}, tags);
 	variant terrain_graphics = tags.top().build();
-	sys::write_file(terrain_graphics_file, terrain_graphics.write_json(true, 4));
+	sys::write_file(terrain_graphics_file, terrain_graphics[""].write_json(true, 4));
 }
