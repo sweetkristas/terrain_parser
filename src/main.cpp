@@ -425,163 +425,6 @@ node_ptr read_wml2(const std::string& contents)
 	return root;
 }
 
-variant read_wml(const std::string& filename, const std::string& contents, int line_offset=0)
-{
-	auto lines = split(contents, "\n", SplitFlags::NONE);
-	int line_count = 1 + line_offset;
-	std::stack<TagHelper> tag_stack;
-	tag_stack.emplace();
-	tag_stack.top().vb = std::make_shared<variant_builder>();
-
-	bool in_multi_line_string = false;
-	bool is_translateable_ml_string = false;
-	std::string ml_string;
-	std::string attribute;
-	std::map<std::string, std::shared_ptr<variant_builder>> last_vb;
-	int expect_merge = 0;
-
-	auto vb = tag_stack.top().vb;
-	for(auto& line : lines) {
-		boost::trim(line);
-		// search for any inline comments to remove or pre-processor directives to action.
-		auto comment_pos = line.find('#');
-		if(comment_pos != std::string::npos) {
-			std::string pre_processor_stmt = line.substr(comment_pos + 1);
-			line = boost::trim_copy(line.substr(0, comment_pos));
-			if(line.empty() && pre_processor_stmt.empty()) {
-				// skip blank lines
-				++line_count;
-				continue;
-			}
-			if((pre_processor_stmt[0] == ' ' || pre_processor_stmt[0] == '#') && line.empty()) {
-				// skip comments.
-				++line_count;
-				continue;
-			}
-		}
-
-		if(line.empty()) {
-			// skip blank lines
-			++line_count;
-			continue;
-		}
-
-		// line should be valid at this point
-		boost::cmatch what;
-		if(in_multi_line_string) {
-			auto quote_pos = line.find('"');
-			ml_string += "\n" + line.substr(0, quote_pos);
-			if(quote_pos != std::string::npos) {
-				in_multi_line_string = false;
-				if(expect_merge) {
-					vb->set(attribute, (is_translateable_ml_string ? "~" : "") + ml_string + (is_translateable_ml_string ? "~" : ""));
-				} else {
-					vb->add(attribute, (is_translateable_ml_string ? "~" : "") + ml_string + (is_translateable_ml_string ? "~" : ""));
-				}
-				is_translateable_ml_string = false;
-			}
-		} else if(boost::regex_match(line.c_str(), what, re_open_tag)) {
-			// Opening tag
-			std::string tag_name(what[1].first, what[1].second);
-			if(tag_name[0] == '+') {
-				auto it = last_vb.find(tag_name.substr(1));
-				ASSERT_LOG(it != last_vb.end(), "Error finding last tag: " << tag_name);				
-				//if(tag_name == "+image") {
-				//	DebuggerBreak();
-				//}
-				vb = it->second;
-				++expect_merge;
-			} else {
-				tag_stack.emplace();
-				tag_stack.top().name = tag_name;
-				vb = tag_stack.top().vb = std::make_shared<variant_builder>();
-				last_vb[tag_name] = tag_stack.top().vb;
-			}
-		} else if(boost::regex_match(line.c_str(), what, re_close_tag)) {
-			// Closing tag
-			std::string this_tag(what[1].first, what[1].second);
-			if(expect_merge != 0) {
-				--expect_merge;
-				continue;
-			}
-			ASSERT_LOG(this_tag == tag_stack.top().name, "tag name mismatch error: " << this_tag << " != " << tag_stack.top().name << "; line: " << line_count);
-			auto old_vb = tag_stack.top().vb;
-			tag_stack.pop();
-			ASSERT_LOG(!tag_stack.empty(), "vtags stack was empty.");
-			// BUG because we build old_vb here, vb doesn't points to the unbuilt data. Which isn't helpful.
-			tag_stack.top().vb->add(this_tag, old_vb->build());
-			vb = tag_stack.top().vb;
-		} else if(boost::regex_match(line.c_str(), what, re_macro_match)) {
-			ASSERT_LOG(false, "Found an unexpanded macro definition." << line_count << ": " << line << "file: " << filename);
-		} else {
-			std::string value;
-			auto pos = line.find_first_of('=');
-			ASSERT_LOG(pos != std::string::npos, "error no '=' on line " << line_count << ": " << line << "file: " << filename);
-			attribute = line.substr(0, pos);
-			value = line.substr(pos + 1);
-			boost::trim(value);
-			if(std::count(value.cbegin(), value.cend(), '"') == 1) {
-				in_multi_line_string = true;
-				is_translateable_ml_string = value[0] == '_';
-				auto quote_pos = value.find('"');
-				ASSERT_LOG(quote_pos != std::string::npos, "Missing quotation mark on line " << line_count << ": " << value);
-				ml_string = value.substr(quote_pos+1);
-			} else if(boost::regex_match(value.c_str(), what, re_num_match)) {
-				std::string frac(what[1].first, what[1].second);
-				if(frac.empty()) {
-					// integer
-					try {
-						int num = boost::lexical_cast<int>(value);
-						if(expect_merge) {
-							vb->set(attribute, num);
-						} else {
-							vb->add(attribute, num);
-						}
-					} catch(boost::bad_lexical_cast&) {
-						ASSERT_LOG(false, "Unable to convert value '" << value << "' to integer.");
-					}
-				} else {
-					// float
-					try {
-						double num = boost::lexical_cast<double>(value);
-						if(expect_merge) {
-							vb->set(attribute, num);
-						} else {
-							vb->add(attribute, num);
-						}
-					} catch(boost::bad_lexical_cast&) {
-						ASSERT_LOG(false, "Unable to convert value '" << value << "' to double.");
-					}
-				}
-			} else {
-				bool is_translateable = false;
-				if(value[0] == '_') {
-					// mark as translatable string
-					is_translateable = true;
-				}
-				// add as string
-				auto quote_pos_start = value.find_first_of('"');
-				auto quote_pos_end = value.find_last_of('"');
-				if(quote_pos_start != std::string::npos && quote_pos_end != std::string::npos) {
-					value = value.substr(quote_pos_start+1, quote_pos_end - (quote_pos_start + 1));
-				}
-				//if(value == "frozen/ice2@V.png") {
-				//	DebuggerBreak();
-				//}
-				if(expect_merge) {
-					vb->set(attribute, (is_translateable ? "~" : "") + value + (is_translateable ? "~" : ""));
-				} else {
-					vb->add(attribute, (is_translateable ? "~" : "") + value + (is_translateable ? "~" : ""));
-				}
-			}
-		}
-
-		++line_count;
-	}
-	ASSERT_LOG(!tag_stack.empty(), "tag_stack was empty.");
-	return tag_stack.top().vb->build();
-}
-
 variant to_int(const std::string& s)
 {
 	// integer
@@ -635,6 +478,82 @@ variant to_list_string(const std::string& s, const std::string& sep=",", SplitFl
 	return variant(&res);
 }
 
+std::map<std::string, variant> process_name_string(const std::string& s)
+{
+	std::map<std::string, variant> res;
+	std::string acc;
+	bool in_brackets = false;
+	int in_parens = 0;
+	std::string current{ "name" };
+	std::string ani_str;
+
+	std::stack<TagHelper2> vb;
+
+	for(auto c : s) {
+		if(c == '~') {
+			// ~ inside brackets is an animation range rather than starting a modifier command.
+			if(!in_brackets) {
+				if(!acc.empty) {
+					res[current] = variant(acc);
+					acc.clear();
+				}
+			}
+		} else if(c == '[') {
+			in_brackets = true;
+		} else if(c == ']') {
+			ASSERT_LOG(in_brackets, "Closing bracket found with no matching open bracket. " << s);
+			in_brackets = false;
+			acc += "@A";
+			auto strs = split(ani_str, '~');
+			ASSERT_LOG(strs.size() == 2, "animation range malformed: " << ani_str);
+			try {
+				int r1 = boost::lexical_cast<int>(strs[0]);
+				int r2 = boost::lexical_cast<int>(strs[1]);
+				if(r1 > r2) {
+					std::swap(r1, r2);
+				}
+				std::vector<variant> range_list;
+				for(int n = r1; n != r2 + 1; ++n) {
+					range_list.emplace_back(n);
+				}
+				res["animation-frames"] = variant(&range_list);
+			} catch(boost::bad_lexical_cast&) {
+				ASSERT_LOG(false, "Unable to parse string into integers: " << ani_str);
+			}
+		} else if(c == '(') {
+			ASSERT_LOG(!acc.empty(), "No command was identified: " << s);
+			vb.emplace();
+			vb.top().name = acc;
+			acc.clear();
+			++in_parens;
+		} else if(c == ')') {
+			--in_parens;
+			vb.top().vb.add(vb.top().name, acc);
+			acc.clear();
+			auto old_tag = vb.top();
+			vb.pop();
+			if(vb.empty()) {
+				res[old_tag.name] = old_tag.vb.build();
+			} else {
+				vb.top().add(old_tag.name, old_tag.vb.build());
+			}
+			//if(current == "CROP") {
+			//} else if(current == MASK) {
+			//} else if(current == BLIT) {
+			//} else if(curent == O) {
+			//} else {
+			//}
+		} else {
+			if(in_brackets) {
+				ani_str += c;
+			} else {
+				acc += c;
+			}
+		}
+	}
+	return res;
+}
+
 int main(int argc, char* argv[])
 {
 	std::vector<std::string> args;
@@ -656,40 +575,7 @@ int main(int argc, char* argv[])
 
 	auto subst_data = macro_substitute(sys::read_file(base_path + terrain_graphics_file));
 	sys::write_file("test.cfg", subst_data);
-	//variant terrain_graphics = read_wml(terrain_graphics_file, subst_data);
-	//sys::write_file(terrain_graphics_file, terrain_graphics.write_json(true, 4));
 
-	/*auto rt = read_wml2("[terrain_graphics]\n\
-[tile]\n\
-x,y=0,0\n\
-type=Ai\n\
-set_no_flag=base\n\
-\n\
-[image]\n\
-name=frozen/ice2@V.png\n\
-variations=\";2;3;4;5;6;7;8;9;10;11\"\n\
-layer=-1000\n\
-[/image]\n\
-[/tile]\n\
-[/terrain_graphics]\n\
-\n\
-[+terrain_graphics]\n\
-probability=10\n\
-[+tile]\n\
-[+image]\n\
-name=frozen/ice2.png\n\
-variations=""\n\
-[/image]\n\
-[/tile]\n\
-[/terrain_graphics]\n");*/
-	auto rt = read_wml2(subst_data);
-	/*rt->pre_order_traversal([](node_ptr n) {
-		std::cout << n->name() << "\n";
-		for(const auto& p : n->attributes()) {
-			std::cout << "  " << p.first << " : " << p.second << "\n";
-		}
-		return true;
-	});*/
 	std::stack<variant_builder> tags;
 	tags.emplace();
 	rt->post_order_traversal<std::stack<variant_builder>>([](node_ptr n, std::stack<variant_builder>& tags) {
@@ -727,6 +613,11 @@ variations=""\n\
 				tags.top().add(p.first, to_list_string(p.second, "\n"));
 			} else if(p.first == "type") {
 				tags.top().add(p.first, to_list_string(p.second));
+			} else if(p.first == "name") {
+				auto name_map = process_name_string(p.second);
+				for(const auto& nm : name_map) {
+					tags.top().add(nm.first, nm.second);
+				}
 			} else {
 				tags.top().add(p.first, p.second);
 			}
