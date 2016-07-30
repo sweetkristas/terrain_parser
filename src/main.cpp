@@ -259,6 +259,133 @@ struct TagHelper
 	std::shared_ptr<variant_builder> vb;
 };
 
+class node;
+typedef std::shared_ptr<node> node_ptr;
+
+class node : public std::enable_shared_from_this<node>
+{
+	public:
+		explicit node(const std::string& name) : name_(name), children_(), attr_(), parent_(parent) {}
+		const std::string& name() const { return name_; }
+		node_ptr add_child(const node_ptr& chld) {
+			child->set_parent(shared_from_this()); 
+			children_.emplace_back(child);
+			return chld;
+		}
+		node_ptr parent() const {
+			auto p = parent_.lock();
+			ASSERT_LOG(p != nullptr, "parent was null.");
+			return p;
+		}
+		void add_attr(const std::string& a, const std::string& v) {
+			attr_[a] = v;
+		}
+	protected:
+		void set_parent(std::shared_ptr parent) { parent_ = parent; }
+	private:
+	`	std::string name_;
+		std::vector<node_ptr> children_;
+		std::map<std::string, std::string> attr_;
+		std::weak_ptr<node> parent_;
+};
+
+node_ptr read_wml2(const std::string& contents) 
+{
+	node_ptr root = std::make_shared<node>();
+	node_ptr current = root;
+	
+	auto lines = split(contents, "\n", SplitFlags::NONE);
+	
+	bool in_multi_line_string = false;
+	bool is_translateable_ml_string = false;
+	std::string ml_string;
+	std::string attribute;
+
+	int expect_merge = 0;
+
+	for(auto& line : lines) {
+		boost::trim(line);
+		// search for any inline comments to remove or pre-processor directives to action.
+		auto comment_pos = line.find('#');
+		if(comment_pos != std::string::npos) {
+			std::string pre_processor_stmt = line.substr(comment_pos + 1);
+			line = boost::trim_copy(line.substr(0, comment_pos));
+			if(line.empty() && pre_processor_stmt.empty()) {
+				// skip blank lines
+				continue;
+			}
+			if((pre_processor_stmt[0] == ' ' || pre_processor_stmt[0] == '#') && line.empty()) {
+				// skip comments.
+				continue;
+			}
+		}
+
+		// line should be valid at this point
+		boost::cmatch what;
+		if(in_multi_line_string) {
+			// XXX
+			auto quote_pos = line.find('"');
+			ml_string += "\n" + line.substr(0, quote_pos);
+			if(quote_pos != std::string::npos) {
+				in_multi_line_string = false;
+				current->add_attr(attribute, (is_translateable_ml_string ? "~" : "") + ml_string + (is_translateable_ml_string ? "~" : ""));
+				is_translateable_ml_string = false;
+				ml_string.clear();
+			}
+		} else if(boost::regex_match(line.c_str(), what, re_open_tag)) {
+			// Opening tag
+			std::string tag_name(what[1].first, what[1].second);
+			if(tag_name[0] == '+') {
+				++expect_merge;
+			} else {
+				current = current->add_child(std::make_shared<node>(tag_name));
+			}
+		} else if(boost::regex_match(line.c_str(), what, re_close_tag)) {
+			// Closing tag
+			std::string this_tag(what[1].first, what[1].second);
+			if(expect_merge != 0) {
+				--expect_merge;
+				continue;
+			}
+			ASSERT_LOG(this_tag == current->name(), "tag name mismatch error: " << this_tag << " != " << current->name() << "; line: " << line_count);
+			current = current->parent();
+		} else if(boost::regex_match(line.c_str(), what, re_macro_match)) {
+			ASSERT_LOG(false, "Found an unexpanded macro definition." << line_count << ": " << line << "file: " << filename);
+		} else {
+			std::string value;
+			auto pos = line.find_first_of('=');
+			ASSERT_LOG(pos != std::string::npos, "error no '=' on line " << line_count << ": " << line << "file: " << filename);
+			attribute = line.substr(0, pos);
+			value = line.substr(pos + 1);
+			boost::trim(value);
+			if(std::count(value.cbegin(), value.cend(), '"') == 1) {
+				in_multi_line_string = true;
+				is_translateable_ml_string = value[0] == '_';
+				auto quote_pos = value.find('"');
+				ASSERT_LOG(quote_pos != std::string::npos, "Missing quotation mark on line " << line_count << ": " << value);
+				ml_string = value.substr(quote_pos+1);
+			} else {
+				bool is_translateable = false;
+				if(value[0] == '_') {
+					// mark as translatable string
+					is_translateable = true;
+				}
+				// add as string
+				auto quote_pos_start = value.find_first_of('"');
+				auto quote_pos_end = value.find_last_of('"');
+				if(quote_pos_start != std::string::npos && quote_pos_end != std::string::npos) {
+					value = value.substr(quote_pos_start+1, quote_pos_end - (quote_pos_start + 1));
+				}
+				current->add_attr(attribute, (is_translateable ? "~" : "") + value + (is_translateable ? "~" : ""));
+			}
+		}
+
+		++line_count;
+	}
+	ASSERT_LOG(!tag_stack.empty(), "tag_stack was empty.");
+	return tag_stack.top().vb->build();
+}
+
 variant read_wml(const std::string& filename, const std::string& contents, int line_offset=0)
 {
 	auto lines = split(contents, "\n", SplitFlags::NONE);
@@ -338,12 +465,13 @@ variant read_wml(const std::string& filename, const std::string& contents, int l
 				--expect_merge;
 				continue;
 			}
-			//ASSERT_LOG(this_tag == tag_stack.top().name, "tag name mismatch error: " << this_tag << " != " << tag_stack.top().name << "; line: " << line_count);
-			//auto old_vb = tag_stack.top().vb;
-			//tag_stack.pop();
-			//ASSERT_LOG(!tag_stack.empty(), "vtags stack was empty.");
-			//tag_stack.top().vb->add(this_tag, old_vb->build());
-			//vb = tag_stack.top().vb;
+			ASSERT_LOG(this_tag == tag_stack.top().name, "tag name mismatch error: " << this_tag << " != " << tag_stack.top().name << "; line: " << line_count);
+			auto old_vb = tag_stack.top().vb;
+			tag_stack.pop();
+			ASSERT_LOG(!tag_stack.empty(), "vtags stack was empty.");
+			// BUG because we build old_vb here, vb doesn't points to the unbuilt data. Which isn't helpful.
+			tag_stack.top().vb->add(this_tag, old_vb->build());
+			vb = tag_stack.top().vb;
 		} else if(boost::regex_match(line.c_str(), what, re_macro_match)) {
 			ASSERT_LOG(false, "Found an unexpanded macro definition." << line_count << ": " << line << "file: " << filename);
 		} else {
@@ -412,12 +540,6 @@ variant read_wml(const std::string& filename, const std::string& contents, int l
 		++line_count;
 	}
 	ASSERT_LOG(!tag_stack.empty(), "tag_stack was empty.");
-	do {
-		auto old_vb = tag_stack.top().vb;
-		const std::string this_tag = tag_stack.top().name;
-		tag_stack.pop();
-		tag_stack.top().vb->add(this_tag, old_vb->build());
-	} while(tag_stack.size() > 1);
 	return tag_stack.top().vb->build();
 }
 
@@ -429,7 +551,7 @@ int main(int argc, char* argv[])
 		args.emplace_back(argv[n]);
 	}
 
-	variant terrain_types = read_wml(terrain_type_file, sys::read_file(base_path + terrain_type_file));
+	/*variant terrain_types = read_wml(terrain_type_file, sys::read_file(base_path + terrain_type_file));
 	sys::write_file(terrain_type_file, terrain_types.write_json(true, 4));
 
 	sys::file_path_map fpm;
@@ -440,18 +562,12 @@ int main(int argc, char* argv[])
 		}
 	}
 
-	//for(const auto& p : get_macro_cache()) {
-	//	const auto& def = p.second->getDefinition();
-	//	std::string sample_def = def.size() > 40 ? def.substr(0, 40) + "..." : def;
-	//	LOG_DEBUG("macro: " << p.first << "; definition: " << sample_def);
-	//}
-	
 	auto subst_data = macro_substitute(sys::read_file(base_path + terrain_graphics_file));
 	sys::write_file("test.cfg", subst_data);
 	variant terrain_graphics = read_wml(terrain_graphics_file, subst_data);
-	sys::write_file(terrain_graphics_file, terrain_graphics.write_json(true, 4));
+	sys::write_file(terrain_graphics_file, terrain_graphics.write_json(true, 4));*/
 
-	/*std::cout << read_wml("test", "[terrain_graphics]\n\
+	std::cout << read_wml2("test", "[terrain_graphics]\n\
 [tile]\n\
 x,y=0,0\n\
 type=Ai\n\
@@ -473,5 +589,5 @@ name=frozen/ice2.png\n\
 variations=""\n\
 [/image]\n\
 [/tile]\n\
-[/terrain_graphics]\n").write_json(true, 4);*/
+[/terrain_graphics]\n").write_json(true, 4);
 }
