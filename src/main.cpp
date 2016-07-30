@@ -254,9 +254,9 @@ std::string macro_substitute(const std::string& contents)
 
 struct TagHelper
 {
-	TagHelper() : name(), vb() {}
+	TagHelper() : name(), vb(nullptr) {}
 	std::string name;
-	variant_builder vb;
+	std::shared_ptr<variant_builder> vb;
 };
 
 variant read_wml(const std::string& filename, const std::string& contents, int line_offset=0)
@@ -265,11 +265,16 @@ variant read_wml(const std::string& filename, const std::string& contents, int l
 	int line_count = 1 + line_offset;
 	std::stack<TagHelper> tag_stack;
 	tag_stack.emplace();
+	tag_stack.top().vb = std::make_shared<variant_builder>();
 
 	bool in_multi_line_string = false;
 	bool is_translateable_ml_string = false;
 	std::string ml_string;
 	std::string attribute;
+	std::map<std::string, std::shared_ptr<variant_builder>> last_vb;
+	int expect_merge = 0;
+
+	auto vb = tag_stack.top().vb;
 	for(auto& line : lines) {
 		boost::trim(line);
 		// search for any inline comments to remove or pre-processor directives to action.
@@ -295,8 +300,6 @@ variant read_wml(const std::string& filename, const std::string& contents, int l
 			continue;
 		}
 
-		auto& vb = tag_stack.top();
-
 		// line should be valid at this point
 		boost::cmatch what;
 		if(in_multi_line_string) {
@@ -304,60 +307,45 @@ variant read_wml(const std::string& filename, const std::string& contents, int l
 			ml_string += "\n" + line.substr(0, quote_pos);
 			if(quote_pos != std::string::npos) {
 				in_multi_line_string = false;
-				vb.vb.add(attribute, (is_translateable_ml_string ? "~" : "") + ml_string + (is_translateable_ml_string ? "~" : ""));
+				if(expect_merge) {
+					vb->set(attribute, (is_translateable_ml_string ? "~" : "") + ml_string + (is_translateable_ml_string ? "~" : ""));
+				} else {
+					vb->add(attribute, (is_translateable_ml_string ? "~" : "") + ml_string + (is_translateable_ml_string ? "~" : ""));
+				}
 				is_translateable_ml_string = false;
 			}
 		} else if(boost::regex_match(line.c_str(), what, re_open_tag)) {
 			// Opening tag
-			std::string last_tag_name(what[1].first, what[1].second);
-			if(last_tag_name[0] == '+') {
-				// replace fields from last tag of this type.
-				bool found = false;
-
-				std::stack<TagHelper> last_tags;
-				while(!found) {
-					ASSERT_LOG(!tag_stack.empty(), "No previous tag of type: " << last_tag_name << " found.");
-					if(tag_stack.top().name == last_tag_name.substr(1)) {
-						found = true;
-					} else {
-						last_tags.emplace(tag_stack.top());
-						tag_stack.pop();
-					}
-				}
-				TagHelper top = tag_stack.top();
-				while(!last_tags.empty()) {
-					tag_stack.emplace(last_tags.top());
-					last_tags.pop();
-				}
-				tag_stack.emplace(top);
+			std::string tag_name(what[1].first, what[1].second);
+			if(tag_name[0] == '+') {
+				auto it = last_vb.find(tag_name.substr(1));
+				ASSERT_LOG(it != last_vb.end(), "Error finding last tag: " << tag_name);				
+				//if(tag_name == "+image") {
+				//	DebuggerBreak();
+				//}
+				vb = it->second;
+				++expect_merge;
 			} else {
 				tag_stack.emplace();
+				tag_stack.top().name = tag_name;
+				vb = tag_stack.top().vb = std::make_shared<variant_builder>();
+				last_vb[tag_name] = tag_stack.top().vb;
 			}
 		} else if(boost::regex_match(line.c_str(), what, re_close_tag)) {
 			// Closing tag
 			std::string this_tag(what[1].first, what[1].second);
-			//if(tag_name_stack.top()[0] == '+') {
-			//	this_tag = '+' + this_tag;
-			//}
-			ASSERT_LOG(this_tag == tag_stack.top().name, "tag name mismatch error: " << this_tag << " != " << tag_stack.top().name << "; line: " << line_count);
-			tag_stack.pop();
-			auto old_vb = tag_stack.top().vb;
-			tag_stack.pop();
-			ASSERT_LOG(!tag_stack.empty(), "vtags stack was empty.");
-			tag_stack.top().vb.add(this_tag, old_vb.build());
-		} else if(boost::regex_match(line.c_str(), what, re_macro_match)) {
-			std::string macro_line(what[1].first, what[1].second);
-			// is a macro, requiring expansion.
-			//LOG_ERROR("unprocessed macro: " << line);
-			macro_line = boost::regex_replace(macro_line, re_whitespace_match, " ");
-			auto strs = split(macro_line, " ", SplitFlags::NONE);
-
-			auto it = get_macro_cache().find(strs.front());
-			if(it == get_macro_cache().end()) {
-				LOG_ERROR("No macro definition for: " << strs.front() << "; line: " << line_count << "; " << filename);
+			if(expect_merge != 0) {
+				--expect_merge;
+				continue;
 			}
-			ASSERT_LOG(it->second != nullptr, "Bad juju programming error. No macro definition.");
-			//variant v = read_wml(it->second->getFilename(), it->second->getDefinition(), it->second->getLineOffset());
+			//ASSERT_LOG(this_tag == tag_stack.top().name, "tag name mismatch error: " << this_tag << " != " << tag_stack.top().name << "; line: " << line_count);
+			//auto old_vb = tag_stack.top().vb;
+			//tag_stack.pop();
+			//ASSERT_LOG(!tag_stack.empty(), "vtags stack was empty.");
+			//tag_stack.top().vb->add(this_tag, old_vb->build());
+			//vb = tag_stack.top().vb;
+		} else if(boost::regex_match(line.c_str(), what, re_macro_match)) {
+			ASSERT_LOG(false, "Found an unexpanded macro definition." << line_count << ": " << line << "file: " << filename);
 		} else {
 			std::string value;
 			auto pos = line.find_first_of('=');
@@ -377,7 +365,11 @@ variant read_wml(const std::string& filename, const std::string& contents, int l
 					// integer
 					try {
 						int num = boost::lexical_cast<int>(value);
-						vb.vb.add(attribute, num);
+						if(expect_merge) {
+							vb->set(attribute, num);
+						} else {
+							vb->add(attribute, num);
+						}
 					} catch(boost::bad_lexical_cast&) {
 						ASSERT_LOG(false, "Unable to convert value '" << value << "' to integer.");
 					}
@@ -385,7 +377,11 @@ variant read_wml(const std::string& filename, const std::string& contents, int l
 					// float
 					try {
 						double num = boost::lexical_cast<double>(value);
-						vb.vb.add(attribute, num);
+						if(expect_merge) {
+							vb->set(attribute, num);
+						} else {
+							vb->add(attribute, num);
+						}
 					} catch(boost::bad_lexical_cast&) {
 						ASSERT_LOG(false, "Unable to convert value '" << value << "' to double.");
 					}
@@ -402,14 +398,27 @@ variant read_wml(const std::string& filename, const std::string& contents, int l
 				if(quote_pos_start != std::string::npos && quote_pos_end != std::string::npos) {
 					value = value.substr(quote_pos_start+1, quote_pos_end - (quote_pos_start + 1));
 				}
-				vb.vb.add(attribute, (is_translateable ? "~" : "") + value + (is_translateable ? "~" : ""));
+				//if(value == "frozen/ice2@V.png") {
+				//	DebuggerBreak();
+				//}
+				if(expect_merge) {
+					vb->set(attribute, (is_translateable ? "~" : "") + value + (is_translateable ? "~" : ""));
+				} else {
+					vb->add(attribute, (is_translateable ? "~" : "") + value + (is_translateable ? "~" : ""));
+				}
 			}
 		}
 
 		++line_count;
 	}
 	ASSERT_LOG(!tag_stack.empty(), "tag_stack was empty.");
-	return tag_stack.top().vb.build();
+	do {
+		auto old_vb = tag_stack.top().vb;
+		const std::string this_tag = tag_stack.top().name;
+		tag_stack.pop();
+		tag_stack.top().vb->add(this_tag, old_vb->build());
+	} while(tag_stack.size() > 1);
+	return tag_stack.top().vb->build();
 }
 
 int main(int argc, char* argv[])
@@ -440,6 +449,29 @@ int main(int argc, char* argv[])
 	auto subst_data = macro_substitute(sys::read_file(base_path + terrain_graphics_file));
 	sys::write_file("test.cfg", subst_data);
 	variant terrain_graphics = read_wml(terrain_graphics_file, subst_data);
-//	variant terrain_graphics = read_wml(terrain_graphics_file, sys::read_file("test.cfg"));
 	sys::write_file(terrain_graphics_file, terrain_graphics.write_json(true, 4));
+
+	/*std::cout << read_wml("test", "[terrain_graphics]\n\
+[tile]\n\
+x,y=0,0\n\
+type=Ai\n\
+set_no_flag=base\n\
+\n\
+[image]\n\
+name=frozen/ice2@V.png\n\
+variations=\";2;3;4;5;6;7;8;9;10;11\"\n\
+layer=-1000\n\
+[/image]\n\
+[/tile]\n\
+[/terrain_graphics]\n\
+\n\
+[+terrain_graphics]\n\
+probability=10\n\
+[+tile]\n\
+[+image]\n\
+name=frozen/ice2.png\n\
+variations=""\n\
+[/image]\n\
+[/tile]\n\
+[/terrain_graphics]\n").write_json(true, 4);*/
 }
