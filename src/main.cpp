@@ -113,7 +113,177 @@ macro_cache_type& get_macro_cache()
 	return res;
 }
 
+struct TagHelper
+{
+	TagHelper() : name(), vb(nullptr) {}
+	std::string name;
+	std::shared_ptr<variant_builder> vb;
+};
 
+struct TagHelper2
+{
+	TagHelper2() : name(), vb() {}
+	std::string name;
+	variant_builder vb;
+};
+
+
+variant read_wml(const std::string& filename, const std::string& contents, int line_offset=0)
+{
+	auto lines = split(contents, "\n", SplitFlags::NONE);
+	int line_count = 1 + line_offset;
+	std::stack<TagHelper> tag_stack;
+	tag_stack.emplace();
+	tag_stack.top().vb = std::make_shared<variant_builder>();
+
+	bool in_multi_line_string = false;
+	bool is_translateable_ml_string = false;
+	std::string ml_string;
+	std::string attribute;
+	std::map<std::string, std::shared_ptr<variant_builder>> last_vb;
+	int expect_merge = 0;
+
+	auto vb = tag_stack.top().vb;
+	for(auto& line : lines) {
+		boost::trim(line);
+		// search for any inline comments to remove or pre-processor directives to action.
+		auto comment_pos = line.find('#');
+		if(comment_pos != std::string::npos) {
+			std::string pre_processor_stmt = line.substr(comment_pos + 1);
+			line = boost::trim_copy(line.substr(0, comment_pos));
+			if(line.empty() && pre_processor_stmt.empty()) {
+				// skip blank lines
+				++line_count;
+				continue;
+			}
+			if((pre_processor_stmt[0] == ' ' || pre_processor_stmt[0] == '#') && line.empty()) {
+				// skip comments.
+				++line_count;
+				continue;
+			}
+		}
+
+		if(line.empty()) {
+			// skip blank lines
+			++line_count;
+			continue;
+		}
+
+		// line should be valid at this point
+		boost::cmatch what;
+		if(in_multi_line_string) {
+			auto quote_pos = line.find('"');
+			ml_string += "\n" + line.substr(0, quote_pos);
+			if(quote_pos != std::string::npos) {
+				in_multi_line_string = false;
+				if(expect_merge) {
+					vb->set(attribute, (is_translateable_ml_string ? "~" : "") + ml_string + (is_translateable_ml_string ? "~" : ""));
+				} else {
+					vb->add(attribute, (is_translateable_ml_string ? "~" : "") + ml_string + (is_translateable_ml_string ? "~" : ""));
+				}
+				is_translateable_ml_string = false;
+			}
+		} else if(boost::regex_match(line.c_str(), what, re_open_tag)) {
+			// Opening tag
+			std::string tag_name(what[1].first, what[1].second);
+			if(tag_name[0] == '+') {
+				auto it = last_vb.find(tag_name.substr(1));
+				ASSERT_LOG(it != last_vb.end(), "Error finding last tag: " << tag_name);				
+				//if(tag_name == "+image") {
+				//	DebuggerBreak();
+				//}
+				vb = it->second;
+				++expect_merge;
+			} else {
+				tag_stack.emplace();
+				tag_stack.top().name = tag_name;
+				vb = tag_stack.top().vb = std::make_shared<variant_builder>();
+				last_vb[tag_name] = tag_stack.top().vb;
+			}
+		} else if(boost::regex_match(line.c_str(), what, re_close_tag)) {
+			// Closing tag
+			std::string this_tag(what[1].first, what[1].second);
+			if(expect_merge != 0) {
+				--expect_merge;
+				continue;
+			}
+			ASSERT_LOG(this_tag == tag_stack.top().name, "tag name mismatch error: " << this_tag << " != " << tag_stack.top().name << "; line: " << line_count);
+			auto old_vb = tag_stack.top().vb;
+			tag_stack.pop();
+			ASSERT_LOG(!tag_stack.empty(), "vtags stack was empty.");
+			// BUG because we build old_vb here, vb doesn't points to the unbuilt data. Which isn't helpful.
+			tag_stack.top().vb->add(this_tag, old_vb->build());
+			vb = tag_stack.top().vb;
+		} else if(boost::regex_match(line.c_str(), what, re_macro_match)) {
+			ASSERT_LOG(false, "Found an unexpanded macro definition." << line_count << ": " << line << "file: " << filename);
+		} else {
+			std::string value;
+			auto pos = line.find_first_of('=');
+			ASSERT_LOG(pos != std::string::npos, "error no '=' on line " << line_count << ": " << line << "file: " << filename);
+			attribute = line.substr(0, pos);
+			value = line.substr(pos + 1);
+			boost::trim(value);
+			if(std::count(value.cbegin(), value.cend(), '"') == 1) {
+				in_multi_line_string = true;
+				is_translateable_ml_string = value[0] == '_';
+				auto quote_pos = value.find('"');
+				ASSERT_LOG(quote_pos != std::string::npos, "Missing quotation mark on line " << line_count << ": " << value);
+				ml_string = value.substr(quote_pos+1);
+			} else if(boost::regex_match(value.c_str(), what, re_num_match)) {
+				std::string frac(what[1].first, what[1].second);
+				if(frac.empty()) {
+					// integer
+					try {
+						int num = boost::lexical_cast<int>(value);
+						if(expect_merge) {
+							vb->set(attribute, num);
+						} else {
+							vb->add(attribute, num);
+						}
+					} catch(boost::bad_lexical_cast&) {
+						ASSERT_LOG(false, "Unable to convert value '" << value << "' to integer.");
+					}
+				} else {
+					// float
+					try {
+						double num = boost::lexical_cast<double>(value);
+						if(expect_merge) {
+							vb->set(attribute, num);
+						} else {
+							vb->add(attribute, num);
+						}
+					} catch(boost::bad_lexical_cast&) {
+						ASSERT_LOG(false, "Unable to convert value '" << value << "' to double.");
+					}
+				}
+			} else {
+				bool is_translateable = false;
+				if(value[0] == '_') {
+					// mark as translatable string
+					is_translateable = true;
+				}
+				// add as string
+				auto quote_pos_start = value.find_first_of('"');
+				auto quote_pos_end = value.find_last_of('"');
+				if(quote_pos_start != std::string::npos && quote_pos_end != std::string::npos) {
+					value = value.substr(quote_pos_start+1, quote_pos_end - (quote_pos_start + 1));
+				}
+				//if(value == "frozen/ice2@V.png") {
+				//	DebuggerBreak();
+				//}
+				if(expect_merge) {
+					vb->set(attribute, (is_translateable ? "~" : "") + value + (is_translateable ? "~" : ""));
+				} else {
+					vb->add(attribute, (is_translateable ? "~" : "") + value + (is_translateable ? "~" : ""));
+				}
+			}
+		}
+
+		++line_count;
+	}
+	ASSERT_LOG(!tag_stack.empty(), "tag_stack was empty.");
+	return tag_stack.top().vb->build();
+}
 
 // suck out macro definitions.
 void pre_process_wml(const std::string& filename, const std::string& contents)
@@ -258,20 +428,6 @@ std::string macro_substitute(const std::string& contents)
 	return output_str;
 }
 
-struct TagHelper
-{
-	TagHelper() : name(), vb(nullptr) {}
-	std::string name;
-	std::shared_ptr<variant_builder> vb;
-};
-
-struct TagHelper2
-{
-	TagHelper2() : name(), vb() {}
-	std::string name;
-	variant_builder vb;
-};
-
 class node;
 typedef std::shared_ptr<node> node_ptr;
 
@@ -287,7 +443,7 @@ class node : public std::enable_shared_from_this<node>
 		}
 		node_ptr parent() const {
 			auto p = parent_.lock();
-			ASSERT_LOG(p != nullptr, "parent was null.");
+			//ASSERT_LOG(p != nullptr, "parent was null.");
 			return p;
 		}
 		void add_attr(const std::string& a, const std::string& v) {
@@ -478,25 +634,35 @@ variant to_list_string(const std::string& s, const std::string& sep=",", SplitFl
 	return variant(&res);
 }
 
-std::map<std::string, variant> process_name_string(const std::string& s)
+std::map<variant, variant> process_name_string(const std::string& s)
 {
-	std::map<std::string, variant> res;
+	std::map<variant, variant> res;
 	std::string acc;
 	bool in_brackets = false;
 	int in_parens = 0;
+	bool start_colon_str = false;
 	std::string current{ "name" };
 	std::string ani_str;
 
-	std::stack<TagHelper2> vb;
+	std::stack<TagHelper2> stk;
+	stk.emplace();
 
 	for(auto c : s) {
 		if(c == '~') {
 			// ~ inside brackets is an animation range rather than starting a modifier command.
 			if(!in_brackets) {
-				if(!acc.empty) {
-					res[current] = variant(acc);
+				if(!acc.empty()) {
+					if(in_parens == 0) {
+						res[variant(current)] = variant(acc);
+					} else {
+						// XXX
+						stk.top().vb.add("param", acc);
+					}
 					acc.clear();
+					current.clear();
 				}
+			} else {
+				ani_str += "~";
 			}
 		} else if(c == '[') {
 			in_brackets = true;
@@ -504,7 +670,7 @@ std::map<std::string, variant> process_name_string(const std::string& s)
 			ASSERT_LOG(in_brackets, "Closing bracket found with no matching open bracket. " << s);
 			in_brackets = false;
 			acc += "@A";
-			auto strs = split(ani_str, '~');
+			auto strs = split(ani_str, "~", SplitFlags::NONE);
 			ASSERT_LOG(strs.size() == 2, "animation range malformed: " << ani_str);
 			try {
 				int r1 = boost::lexical_cast<int>(strs[0]);
@@ -516,33 +682,39 @@ std::map<std::string, variant> process_name_string(const std::string& s)
 				for(int n = r1; n != r2 + 1; ++n) {
 					range_list.emplace_back(n);
 				}
-				res["animation-frames"] = variant(&range_list);
+				res[variant("animation-frames")] = variant(&range_list);
 			} catch(boost::bad_lexical_cast&) {
 				ASSERT_LOG(false, "Unable to parse string into integers: " << ani_str);
 			}
+		} else if(c == ':') {
+			if(!acc.empty()) {
+				res[variant("name")] = variant(acc);
+				acc.clear();
+			}
+			start_colon_str = true;
 		} else if(c == '(') {
 			ASSERT_LOG(!acc.empty(), "No command was identified: " << s);
-			vb.emplace();
-			vb.top().name = acc;
+			// XXX
+			stk.top().name = acc;
+			stk.emplace();
 			acc.clear();
 			++in_parens;
 		} else if(c == ')') {
-			--in_parens;
-			vb.top().vb.add(vb.top().name, acc);
-			acc.clear();
-			auto old_tag = vb.top();
-			vb.pop();
-			if(vb.empty()) {
-				res[old_tag.name] = old_tag.vb.build();
-			} else {
-				vb.top().add(old_tag.name, old_tag.vb.build());
+			// XXX
+			if(!acc.empty()) {
+				stk.top().vb.add("param", acc);
 			}
+			auto v = stk.top().vb.build();
+			stk.pop();
+			stk.top().vb.add(stk.top().name, v);
 			//if(current == "CROP") {
 			//} else if(current == MASK) {
 			//} else if(current == BLIT) {
 			//} else if(curent == O) {
 			//} else {
 			//}
+			acc.clear();
+			--in_parens;
 		} else {
 			if(in_brackets) {
 				ani_str += c;
@@ -551,7 +723,38 @@ std::map<std::string, variant> process_name_string(const std::string& s)
 			}
 		}
 	}
+	
+	// XXX
+	auto v = stk.top().vb.build();
+	if(v.is_map() && v.num_elements() != 0) {
+		for(const auto& p : v.as_map()) {
+			res[variant(p.first)] = p.second;
+		}
+	}
+
+	if(!acc.empty()) {
+		if(start_colon_str) {
+			try {
+				double num = boost::lexical_cast<double>(acc);
+				res[variant("animation_timing")] = variant(num);
+			} catch(boost::bad_lexical_cast&) {
+				ASSERT_LOG(false, "Bad number for animation timing: " << acc);
+			}
+		} else {
+			res[variant(current)] = variant(acc);
+		}
+	}
 	return res;
+}
+
+void print_map(const std::map<variant, variant>& m)
+{
+	std::stringstream ss;
+	ss << "\n";
+	for(const auto& p : m) {
+		ss << p.first << ":" << p.second.write_json(true, 4) << "\n";
+	}
+	std::cout << ss.str();
 }
 
 int main(int argc, char* argv[])
@@ -575,6 +778,7 @@ int main(int argc, char* argv[])
 
 	auto subst_data = macro_substitute(sys::read_file(base_path + terrain_graphics_file));
 	sys::write_file("test.cfg", subst_data);
+	auto rt = read_wml2(subst_data);
 
 	std::stack<variant_builder> tags;
 	tags.emplace();
@@ -616,7 +820,7 @@ int main(int argc, char* argv[])
 			} else if(p.first == "name") {
 				auto name_map = process_name_string(p.second);
 				for(const auto& nm : name_map) {
-					tags.top().add(nm.first, nm.second);
+					tags.top().add(nm.first.as_string(), nm.second);
 				}
 			} else {
 				tags.top().add(p.first, p.second);
@@ -628,4 +832,17 @@ int main(int argc, char* argv[])
 	}, tags);
 	variant terrain_graphics = tags.top().build();
 	sys::write_file(terrain_graphics_file, terrain_graphics[""].write_json(true, 4));
+
+	/*auto ret = process_name_string("village/drake1-A[01~03].png:200");
+	print_map(ret);
+	ret = process_name_string("off-map/border.png");
+	print_map(ret);
+	ret = process_name_string("off-map/border-@R0-@R1.png");
+	print_map(ret);
+	ret = process_name_string("impassable-editor.png~O(0.5)");
+	print_map(ret);
+	ret = process_name_string("off-map/border.png~MASK(terrain/masks/long-concave-2-@R0.png~BLIT(terrain/masks/long-concave-2-@R1.png)~BLIT(terrain/masks/long-concave-2-@R2.png)~BLIT(terrain/masks/long-concave-2-@R3.png)~BLIT(terrain/masks/long-concave-2-@R4.png)~BLIT(terrain/masks/long-concave-2-@R5.png))");
+	print_map(ret);
+	ret = process_name_string("water/water[01~17].png~CROP(0,0,72,72):100");
+	print_map(ret);*/
 }
