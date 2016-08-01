@@ -15,6 +15,9 @@
 #include "variant.hpp"
 #include "variant_utils.hpp"
 
+#define METHOD1
+//#define METHOD2
+
 namespace 
 {
 #ifdef __linux__
@@ -610,24 +613,42 @@ std::map<variant, variant> process_name_string(const std::string& s)
 		} else if(c == '(') {
 			ASSERT_LOG(!acc.empty(), "No command was identified: " << s);
 			// XXX
-			stk.top().name = acc;
+			current = stk.top().name = acc;
 			stk.emplace();
 			acc.clear();
 			++in_parens;
 		} else if(c == ')') {
 			// XXX
 			if(!acc.empty()) {
-				stk.top().vb.add("param", acc);
+				const std::string& func = current;
+				if(func == "CROP") {
+					auto strs = split(acc, ",", SplitFlags::NONE);
+					try {
+						for(auto& crop_p : strs) {
+							stk.top().vb.add("param", boost::lexical_cast<int>(crop_p));
+						}
+					} catch(boost::bad_lexical_cast&) {
+						ASSERT_LOG(false, "Unable to convert " << acc << " to a number.");
+					}
+				} else if(func == "MASK") {
+					stk.top().vb.add("param", acc);
+				} else if(func == "BLIT") {
+					stk.top().vb.add("param", acc);
+				} else if(func == "O") {
+					size_t is_percent = acc.find('%');
+					try {
+						float opacity = boost::lexical_cast<float>(is_percent != std::string::npos ? acc.substr(0, is_percent) : acc);
+						stk.top().vb.add("param", is_percent != std::string::npos ? (opacity / 100.f) : opacity);
+					} catch(boost::bad_lexical_cast&) {
+						ASSERT_LOG(false, "Unable to convert " << acc << " to a number.");
+					}
+				} else {
+					stk.top().vb.add("param", acc);
+				}
 			}
 			auto v = stk.top().vb.build();
 			stk.pop();
 			stk.top().vb.add(stk.top().name, v);
-			//if(current == "CROP") {
-			//} else if(current == MASK) {
-			//} else if(current == BLIT) {
-			//} else if(curent == O) {
-			//} else {
-			//}
 			acc.clear();
 			--in_parens;
 		} else {
@@ -680,7 +701,8 @@ int main(int argc, char* argv[])
 		args.emplace_back(argv[n]);
 	}
 
-	/* First version generates a monolithic json file with all the terrain data.
+#ifdef METHOD1
+	// First version generates a monolithic json file with all the terrain data.
 	variant terrain_types = read_wml(terrain_type_file, sys::read_file(base_path + terrain_type_file));
 	sys::write_file(terrain_type_file, terrain_types.write_json(true, 4));
 
@@ -756,7 +778,7 @@ int main(int argc, char* argv[])
 	}, tags);
 	variant terrain_graphics = tags.top().build();
 	sys::write_file(terrain_graphics_file, terrain_graphics[""].write_json(true, 4));
-	*/
+#endif // METHOD1
 
 	/*auto ret = process_name_string("village/drake1-A[01~03].png:200");
 	print_map(ret);
@@ -771,5 +793,7 @@ int main(int argc, char* argv[])
 	ret = process_name_string("water/water[01~17].png~CROP(0,0,72,72):100");
 	print_map(ret);*/
 
+#ifdef METHOD2
 	parse_terrain_files(base_path + terrain_graphics_macros_dir, base_path + terrain_graphics_file);
+#endif // METHOD2
 }
