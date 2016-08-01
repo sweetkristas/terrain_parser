@@ -22,6 +22,7 @@
     <ClCompile Include="..\src\filesystem.cpp" />
     <ClCompile Include="..\src\json.cpp" />
     <ClCompile Include="..\src\main.cpp" />
+    <ClCompile Include="..\src\terrain_parser.cpp" />
     <ClCompile Include="..\src\unit_test.cpp" />
     <ClCompile Include="..\src\variant.cpp" />
     <ClCompile Include="..\src\variant_utils.cpp" />
@@ -33,6 +34,7 @@
     <ClInclude Include="..\src\json.hpp" />
     <ClInclude Include="..\src\lexical_cast.hpp" />
     <ClInclude Include="..\src\profile_timer.hpp" />
+    <ClInclude Include="..\src\terrain_parser.hpp" />
     <ClInclude Include="..\src\unit_test.hpp" />
     <ClInclude Include="..\src\uri.hpp" />
     <ClInclude Include="..\src\utf8_to_codepoint.hpp" />

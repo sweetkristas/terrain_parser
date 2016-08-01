@@ -11,6 +11,7 @@
 
 #include "asserts.hpp"
 #include "filesystem.hpp"
+#include "terrain_parser.hpp"
 #include "variant.hpp"
 #include "variant_utils.hpp"
 
@@ -37,33 +38,14 @@ namespace
 	boost::regex re_quote_match("\"(.*?)\"");
 }
 
-enum class SplitFlags {
-	NONE					= 0,
-	ALLOW_EMPTY_STRINGS		= 1,
-};
-
 std::vector<std::string> split(const std::string& str, const std::string& delimiters, SplitFlags flags)
 {
 	std::vector<std::string> res;
-	boost::split(res, str, boost::is_any_of(delimiters));
+	boost::split(res, str, boost::is_any_of(delimiters), boost::token_compress_on);
 	if(flags == SplitFlags::NONE) {
 		res.erase(std::remove(res.begin(), res.end(), ""), res.end());
 	}
 	return res;
-	/*std::vector<std::string> v;
-	std::string::size_type start = 0;
-	std::string::size_type pos = str.find_first_of(delimiters, start);
-	 do {
-		if(pos != start || flags == SplitFlags::ALLOW_EMPTY_STRINGS) { // ignore empty tokens
-			v.emplace_back(str, start, pos - start);
-		}
-		start = pos + 1;
-		pos = str.find_first_of(delimiters, start);
-	} while(pos != std::string::npos);
-	if(start < str.length()) { // ignore trailing delimiter
-		v.emplace_back(str, start, str.length() - start); // add what's left of the string
-	}
-	return v;*/
 }
 
 class WmlReader
@@ -81,32 +63,6 @@ private:
 	int line_count_;
 };
 
-class Macro
-{
-public:
-	explicit Macro(const std::string& name, const std::vector<std::string>& params)
-		: name_(name),
-		  params_(params),
-		  data_()
-	{
-	}
-	void setDefinition(const std::string& v) { data_ = v; }
-	const std::string& getDefinition() const { return data_; }
-	void setFileDetails(const std::string& fname, int offset) { filename_ = fname; line_offset_ = offset; }
-	const std::string& getFilename() const { return filename_; }
-	int getLineOffset() const { return line_offset_; }
-	const std::vector<std::string>& getParams() const { return params_; }
-private:
-	std::string name_;
-	std::vector<std::string> params_;
-	std::string data_;
-	std::string filename_;
-	int line_offset_;
-};
-
-typedef std::shared_ptr<Macro> MacroPtr;
-
-typedef std::map<std::string, MacroPtr> macro_cache_type;
 macro_cache_type& get_macro_cache()
 {
 	static macro_cache_type res;
@@ -220,7 +176,7 @@ variant read_wml(const std::string& filename, const std::string& contents, int l
 			std::string value;
 			auto pos = line.find_first_of('=');
 			ASSERT_LOG(pos != std::string::npos, "error no '=' on line " << line_count << ": " << line << "file: " << filename);
-			attribute = line.substr(0, pos);
+			attribute = boost::trim_copy(line.substr(0, pos));			
 			value = line.substr(pos + 1);
 			boost::trim(value);
 			if(std::count(value.cbegin(), value.cend(), '"') == 1) {
@@ -255,6 +211,12 @@ variant read_wml(const std::string& filename, const std::string& contents, int l
 					} catch(boost::bad_lexical_cast&) {
 						ASSERT_LOG(false, "Unable to convert value '" << value << "' to double.");
 					}
+				}
+			} else if(value == "yes" || value == "no" || value == "true" || value == "false") {
+				if(value == "yes" || value == "true") {
+					vb->add(attribute, variant::from_bool(true));
+				} else {
+					vb->add(attribute, variant::from_bool(false));
 				}
 			} else {
 				bool is_translateable = false;
@@ -428,57 +390,6 @@ std::string macro_substitute(const std::string& contents)
 	return output_str;
 }
 
-class node;
-typedef std::shared_ptr<node> node_ptr;
-
-class node : public std::enable_shared_from_this<node>
-{
-	public:
-		explicit node(const std::string& name) : name_(name), children_(), attr_(), parent_() {}
-		const std::string& name() const { return name_; }
-		node_ptr add_child(const node_ptr& child) {
-			child->set_parent(shared_from_this()); 
-			children_.emplace_back(child);
-			return child;
-		}
-		node_ptr parent() const {
-			auto p = parent_.lock();
-			//ASSERT_LOG(p != nullptr, "parent was null.");
-			return p;
-		}
-		void add_attr(const std::string& a, const std::string& v) {
-			attr_[a] = v;
-		}
-		const std::map<std::string, std::string>& attributes() const { return attr_; }
-		template<typename T>
-		bool pre_order_traversal(std::function<bool(node_ptr, T& param)> fn, T& param) {
-			if(!fn(shared_from_this(), param)) {
-				return false;
-			}
-			for(auto& c : children_) {
-				if(!c->pre_order_traversal(fn, param)) {
-					return false;
-				}
-			}
-			return true;
-		}
-		template<typename T>
-		void post_order_traversal(std::function<void(node_ptr, T& param)> fn1, std::function<void(node_ptr, T& param)> fn2, T& param) {
-			fn1(shared_from_this(), param);
-			for(auto& c : children_) {
-				c->post_order_traversal(fn1, fn2, param);
-			}
-			fn2(shared_from_this(), param);
-		}
-	protected:
-		void set_parent(node_ptr parent) { parent_ = parent; }
-	private:
-		std::string name_;
-		std::vector<node_ptr> children_;
-		std::map<std::string, std::string> attr_;
-		std::weak_ptr<node> parent_;
-};
-
 node_ptr read_wml2(const std::string& contents) 
 {
 	node_ptr root = std::make_shared<node>("");
@@ -583,6 +494,10 @@ node_ptr read_wml2(const std::string& contents)
 
 variant to_int(const std::string& s)
 {
+	boost::cmatch what;
+	if(boost::regex_match(s.c_str(), what, re_macro_match)) {
+		return variant(s);
+	}
 	// integer
 	try {
 		int num = boost::lexical_cast<int>(s);
@@ -593,7 +508,7 @@ variant to_int(const std::string& s)
 	return variant();
 }
 
-variant to_list_int(const std::string& s, const std::string& sep=",")
+variant to_list_int(const std::string& s, const std::string& sep)
 {
 	std::vector<variant> list;
 	const auto strs = split(s, sep, SplitFlags::NONE);
@@ -624,7 +539,7 @@ variant to_list_int(const std::string& s, const std::string& sep=",")
 	return variant(&list);
 }
 
-variant to_list_string(const std::string& s, const std::string& sep=",", SplitFlags flags=SplitFlags::NONE)
+variant to_list_string(const std::string& s, const std::string& sep, SplitFlags flags)
 {
 	std::vector<variant> res;
 	const auto strs = split(s, sep, flags);
@@ -765,6 +680,7 @@ int main(int argc, char* argv[])
 		args.emplace_back(argv[n]);
 	}
 
+	/* First version generates a monolithic json file with all the terrain data.
 	variant terrain_types = read_wml(terrain_type_file, sys::read_file(base_path + terrain_type_file));
 	sys::write_file(terrain_type_file, terrain_types.write_json(true, 4));
 
@@ -797,13 +713,21 @@ int main(int argc, char* argv[])
 			} else if(p.first == "rotations") {
 				tags.top().add(p.first, to_list_string(p.second));
 			} else if(p.first == "set_no_flag") {
-				tags.top().add(p.first, to_list_string(p.second));
+				if(!p.second.empty()) {
+					tags.top().add(p.first, to_list_string(p.second));
+				}
 			} else if(p.first == "set_flag") {
-				tags.top().add(p.first, to_list_string(p.second));
+				if(!p.second.empty()) {
+					tags.top().add(p.first, to_list_string(p.second));
+				}
 			} else if(p.first == "no_flag") {
-				tags.top().add(p.first, to_list_string(p.second));
+				if(!p.second.empty()) {
+					tags.top().add(p.first, to_list_string(p.second));
+				}
 			} else if(p.first == "has_flag") {
-				tags.top().add(p.first, to_list_string(p.second));
+				if(!p.second.empty()) {
+					tags.top().add(p.first, to_list_string(p.second));
+				}
 			} else if(p.first == "variations") {
 				//tags.top().add(p.first, to_list_int(p.second, ";"));
 				tags.top().add(p.first, to_list_string(p.second, ";", SplitFlags::ALLOW_EMPTY_STRINGS));
@@ -832,6 +756,7 @@ int main(int argc, char* argv[])
 	}, tags);
 	variant terrain_graphics = tags.top().build();
 	sys::write_file(terrain_graphics_file, terrain_graphics[""].write_json(true, 4));
+	*/
 
 	/*auto ret = process_name_string("village/drake1-A[01~03].png:200");
 	print_map(ret);
@@ -845,4 +770,6 @@ int main(int argc, char* argv[])
 	print_map(ret);
 	ret = process_name_string("water/water[01~17].png~CROP(0,0,72,72):100");
 	print_map(ret);*/
+
+	parse_terrain_files(base_path + terrain_graphics_macros_dir, base_path + terrain_graphics_file);
 }

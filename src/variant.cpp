@@ -438,7 +438,7 @@ void variant::write_json(std::ostream& os, bool pretty, int indent) const
 		os << "null";
 		break;
 	case VARIANT_TYPE_BOOL:
-		os << b_ ? "true" : "false";
+		os << (b_ ? "true" : "false");
 		break;
 	case VARIANT_TYPE_INTEGER:
 		os << i_;
@@ -468,6 +468,8 @@ void variant::write_json(std::ostream& os, bool pretty, int indent) const
 			} else*/ 
 			if(*it == '\n') {
 				os << "\\n";
+			} else if(*it == '\\') {
+				os << "\\\\";
 			} else if(*it > 128) {
 				uint8_t value = uint8_t(*it);
 				uint16_t code_point = 0;
