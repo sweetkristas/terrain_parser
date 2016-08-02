@@ -552,6 +552,68 @@ variant to_list_string(const std::string& s, const std::string& sep, SplitFlags 
 	return variant(&res);
 }
 
+variant to_list_string_flags(const std::string& s, const std::string& sep, SplitFlags flags)
+{
+	std::string symbol;
+	int start_range = -1;
+	int end_range = -1;
+	bool is_range = false;
+	std::vector<variant> res;
+	std::string base_str;
+	bool in_anim = false;
+
+	for(auto c : s) {
+		if(c == '~' && in_anim) {
+			try {
+				start_range = boost::lexical_cast<int>(symbol);
+				is_range = true;
+				symbol.clear();
+			} catch(boost::bad_lexical_cast&) {
+				ASSERT_LOG(false, "Failed to convert symbol to integer: " << symbol);
+			}
+		} else if(c == '[') {
+			in_anim = true;
+			base_str = symbol;
+			symbol.clear();
+		} else if(c == ',' || c == ']') {
+			if(!symbol.empty()) {
+				if(is_range) {
+					try {
+						end_range = boost::lexical_cast<int>(symbol);
+						is_range = false;
+						symbol.clear();
+						
+						for(int n = start_range; n != end_range+1; ++n) {
+							std::stringstream ss;
+							ss << base_str << n;
+							res.emplace_back(ss.str());
+						}
+						start_range = end_range = -1;
+					} catch(boost::bad_lexical_cast&) {
+						ASSERT_LOG(false, "Failed to convert symbol to integer: " << symbol);
+					}
+				} else if(in_anim) {
+					res.emplace_back(base_str + symbol);
+				} else {
+					res.emplace_back(symbol);
+				}
+			}
+			symbol.clear();
+		} else {
+			symbol += c;
+		}
+		if(c == ']') {
+			ASSERT_LOG(in_anim, "Not in animation definition already: " << s);
+			in_anim = false;
+		}
+	}
+	if(!symbol.empty()) {
+		res.emplace_back(symbol);
+	}
+
+	return variant(&res);
+}
+
 std::map<variant, variant> process_name_string(const std::string& s)
 {
 	std::map<variant, variant> res;
@@ -736,19 +798,19 @@ int main(int argc, char* argv[])
 				tags.top().add(p.first, to_list_string(p.second));
 			} else if(p.first == "set_no_flag") {
 				if(!p.second.empty()) {
-					tags.top().add(p.first, to_list_string(p.second));
+					tags.top().add(p.first, to_list_string_flags(p.second, ",", SplitFlags::NONE));
 				}
 			} else if(p.first == "set_flag") {
 				if(!p.second.empty()) {
-					tags.top().add(p.first, to_list_string(p.second));
+					tags.top().add(p.first, to_list_string_flags(p.second, ",", SplitFlags::NONE));
 				}
 			} else if(p.first == "no_flag") {
 				if(!p.second.empty()) {
-					tags.top().add(p.first, to_list_string(p.second));
+					tags.top().add(p.first, to_list_string_flags(p.second, ",", SplitFlags::NONE));
 				}
 			} else if(p.first == "has_flag") {
 				if(!p.second.empty()) {
-					tags.top().add(p.first, to_list_string(p.second));
+					tags.top().add(p.first, to_list_string_flags(p.second, ",", SplitFlags::NONE));
 				}
 			} else if(p.first == "variations") {
 				//tags.top().add(p.first, to_list_int(p.second, ";"));
