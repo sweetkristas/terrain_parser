@@ -184,7 +184,7 @@ variant read_wml(const std::string& filename, const std::string& contents, int l
 			boost::trim(value);
 			if(std::count(value.cbegin(), value.cend(), '"') == 1) {
 				in_multi_line_string = true;
-				is_translateable_ml_string = value[0] == '_';
+				is_translateable_ml_string = value[0] == '_' && (value[1] == ' ' || value[1] == '"');
 				auto quote_pos = value.find('"');
 				ASSERT_LOG(quote_pos != std::string::npos, "Missing quotation mark on line " << line_count << ": " << value);
 				ml_string = value.substr(quote_pos+1);
@@ -223,7 +223,7 @@ variant read_wml(const std::string& filename, const std::string& contents, int l
 				}
 			} else {
 				bool is_translateable = false;
-				if(value[0] == '_') {
+				if(value[0] == '_' && (value[1] == ' ' || value[1] == '"')) {
 					// mark as translatable string
 					is_translateable = true;
 				}
@@ -472,13 +472,13 @@ node_ptr read_wml2(const std::string& contents)
 			boost::trim(value);
 			if(std::count(value.cbegin(), value.cend(), '"') == 1) {
 				in_multi_line_string = true;
-				is_translateable_ml_string = value[0] == '_';
+				is_translateable_ml_string = value[0] == '_' && (value[1] == ' ' || value[1] == '"');
 				auto quote_pos = value.find('"');
 				ASSERT_LOG(quote_pos != std::string::npos, "Missing quotation mark on line " << line);
 				ml_string = value.substr(quote_pos+1);
 			} else {
 				bool is_translateable = false;
-				if(value[0] == '_') {
+				if(value[0] == '_' && (value[1] == ' ' || value[1] == '"')) {
 					// mark as translatable string
 					is_translateable = true;
 				}
