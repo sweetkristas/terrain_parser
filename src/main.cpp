@@ -814,11 +814,19 @@ int main(int argc, char* argv[])
 				}
 			} else if(p.first == "variations") {
 				//tags.top().add(p.first, to_list_int(p.second, ";"));
-				tags.top().add(p.first, to_list_string(p.second, ";", SplitFlags::ALLOW_EMPTY_STRINGS));
+				auto vars = to_list_string(p.second, ";", SplitFlags::ALLOW_EMPTY_STRINGS);
+				if(vars.is_null() || vars.num_elements() == 1 && vars[0].as_string().empty()) {
+					continue;
+				}
+				tags.top().add(p.first, vars);
 			} else if(p.first == "x,y") {
 				auto v = to_list_int(p.second);
 				tags.top().add("x", v[0]);
 				tags.top().add("y", v[1]);
+			} else if(p.first == "mod_x") {
+				tags.top().add(p.first, to_int(p.second));
+			} else if(p.first == "mod_y") {
+				tags.top().add(p.first, to_int(p.second));
 			} else if(p.first == "probability") {
 				tags.top().add(p.first, to_int(p.second));
 			} else if(p.first == "map") {
