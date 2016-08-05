@@ -627,7 +627,10 @@ std::map<variant, variant> process_name_string(const std::string& s)
 	std::stack<TagHelper2> stk;
 	stk.emplace();
 
-	for(auto c : s) {
+	std::string new_str = boost::replace_all_copy(s, "/", "-");
+	boost::replace_first(new_str, ".png", "");
+
+	for(auto c : new_str) {
 		if(c == '~') {
 			// ~ inside brackets is an animation range rather than starting a modifier command.
 			if(!in_brackets) {
